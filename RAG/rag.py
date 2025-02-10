@@ -29,7 +29,7 @@ class EmbeddingService:
         text = self.read_data_from_file('data.txt')
 
         # Разделение текста на чанки с оверлапом
-        chunks = self.split_text_into_chunks(text, chunk_size=250, chunk_overlap=50)
+        chunks = self.split_text_into_chunks(text, chunk_size=750, chunk_overlap=50)
 
         # Конвертируем строки в документы
         self.documents = [Document(page_content=chunk) for chunk in chunks]

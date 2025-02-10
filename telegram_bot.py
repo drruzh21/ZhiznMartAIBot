@@ -12,7 +12,7 @@ from telegram import InlineKeyboardMarkup, InlineKeyboardButton, InlineQueryResu
 from telegram import InputTextMessageContent, BotCommand
 from telegram.error import RetryAfter, TimedOut, BadRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, \
-    filters, CallbackQueryHandler, Application, ContextTypes, CallbackContext
+    filters, CallbackQueryHandler, ContextTypes, CallbackContext
 
 from pydub import AudioSegment
 from PIL import Image
@@ -21,12 +21,12 @@ from graph_state import GraphState
 
 from RAG.building_and_running_graph import run_graph
 from utils import is_group_chat, get_thread_id, message_text, wrap_with_indicator, split_into_chunks, \
-    edit_message_with_retry, get_stream_cutoff_values, is_allowed, get_remaining_budget, is_within_budget, \
+    edit_message_with_retry, get_stream_cutoff_values, is_allowed, is_within_budget, \
     get_reply_to_message_id, add_chat_request_to_usage_tracker, error_handler, is_direct_result, handle_direct_result, \
     cleanup_intermediate_files, start_text
 from openai_helper import OpenAIHelper, localized_text
 from usage_tracker import UsageTracker
-
+logger = logging.getLogger(__name__)
 
 class ChatGPTTelegramBot:
     """
@@ -724,8 +724,13 @@ class ChatGPTTelegramBot:
 
                 nonlocal total_tokens
                 # Передаём состояние в run_graph и обновляем его
-                response, total_tokens = await run_graph(state)
-
+                try:
+                    logger.info(f"Starting RAG workflow for chat_id {state.chat_id}")
+                    response, total_tokens = await run_graph(state.openai_helper, state.chat_id, state.question)
+                    logger.info(f"RAG workflow completed successfully for chat_id {state.chat_id}")
+                except Exception as e:
+                    logger.error(f"Error in RAG workflow for chat_id {state.chat_id}: {str(e)}")
+                    raise
                 # Обработка direct_result
                 if is_direct_result(response):
                     print("\nDirect result\n")

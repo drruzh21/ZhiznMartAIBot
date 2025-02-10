@@ -1,91 +1,108 @@
+from langgraph.graph import END, StateGraph
+
+from RAG.graph_ai import GraphState, retrieve, grade_documents, generate, \
+    grade_generation_vs_documents_and_question, decide_to_generate, transform_query, send_sorry_message, \
+    decide_to_transform_query, transformation_count_increment
+from openai_helper import OpenAIHelper
+import asyncio
 
 
-from RAG.rag import EmbeddingService
-from graph_state import GraphState, ClientQualification
+import logging
 
-embedding_service = EmbeddingService()
+# Configure logging
+logger = logging.getLogger(__name__)
 
-prompt_to_gpt = """
-Опираясь свои профессиональные знания из контекста, ответь пользователю на вопрос:
-{question}
+async def run_graph(openai: OpenAIHelper, chat_id: int, question):
+    """Execute the RAG workflow graph asynchronously.
+    
+    Args:
+        openai: OpenAI helper instance
+        chat_id: Telegram chat ID
+        question: User's question
+        
+    Returns:
+        tuple: (final_generation, total_tokens)
+    """
+    # Create an async wrapper for the generate function
+    async def async_generate_wrapper(state):
+        """Async wrapper for the generate function that uses the existing event loop"""
+        try:
+            return await generate(state)
+        except Exception as e:
+            logger.error(f"Error in generate: {str(e)}")
+            raise
 
-"""
+    workflow = StateGraph(GraphState)
 
-prompt_to_gpt_second_agent = """
-Опираясь на свои инструкции, ответь клиенту:\n 
-{question}
-"""
+    # Define the nodes
+    # Add nodes to the workflow
+    workflow.add_node("retrieve", retrieve)
+    workflow.add_node("grade_documents", grade_documents)
+    workflow.add_node("generate", async_generate_wrapper)
+    workflow.add_node("transform_query", transform_query)
+    workflow.add_node("send_sorry_message", send_sorry_message)
+    workflow.add_node("transformation_count_increment", transformation_count_increment)
 
-def branch_logic(state):
-    # Загружаем беседу
-    conversations = state.openai_helper.conversations.get(state.chat_id, [])
-    # Извлекаем первое системное сообщение
-    first_system_message = conversations[0]
-    system_message_text = first_system_message["content"]
-    system_message_text = system_message_text.replace("{{DATA}}", str(embedding_service.fusion_retrieval(state.question)))
-    conversations[0]["content"] = system_message_text
+    # Build graph
+    workflow.set_entry_point("retrieve")
+    workflow.add_edge("retrieve", "grade_documents")
+    workflow.add_conditional_edges(
+        "grade_documents",
+        decide_to_generate,
+        {
+            "send_sorry_message": "send_sorry_message",
+            "generate": "generate",
+        },
+    )
+    workflow.add_conditional_edges(
+        "generate",
+        grade_generation_vs_documents_and_question,
+        {
+            "not supported": "generate",
+            "useful": END,
+            "not useful": "transformation_count_increment",
+        },
+    )
+    workflow.add_conditional_edges(
+        "transformation_count_increment",
+        decide_to_transform_query,
+        {
+            "send_sorry_message": "send_sorry_message",
+            "transform_query": "transform_query",
+        },
+    )
+    workflow.add_edge("transform_query", "retrieve")
+    workflow.add_edge("send_sorry_message", END)
 
+    # Compile
+    app = workflow.compile()
+    from pprint import pprint
 
-# Функция для GPT генерации
-async def gpt(state: GraphState):
-    question = state.question
-    chat_id = state.chat_id
-    openai_helper = state.openai_helper
-
-    query = prompt_to_gpt.format(question=question)
-
-    branch_logic(state)
-    generation, total_tokens = await openai_helper.get_chat_response(chat_id=chat_id, query=query)
-
-    state.generation = generation  # Обновляем состояние
-    state.total_tokens += int(total_tokens)
-    return state
-
-
-# async def gpt_second_agent(state: GraphState):
-#    question = state.question
-#    chat_id = state.chat_id
-#    openai_helper = state.openai_helper
-#
-#    # Обновляем сообщение с ролью 'system' в истории чата
-#    for message in openai_helper.conversations.get(chat_id, []):
-#        if message["role"] == "system":
-#            message["content"] = system_prompt_to_gpt_second_agent
-#            break  # Обновляем только одно сообщение и выходим из цикла
-#
-#    query = prompt_to_gpt_second_agent.format(question=question)
-#
-#    generation, total_tokens = await openai_helper.get_chat_response(chat_id=chat_id, query=query)
-#
-#    # Обновляем состояние
-#    state.generation = generation
-#    state.total_tokens += total_tokens
-#    return state
-
-
-
-def save_qualification(state: GraphState, qualification: ClientQualification):
-    if qualification:
-        qualification_data = qualification.dict()
-        if state.qualification:
-            for field, value in qualification_data.items():
-                if value is not None and getattr(state.qualification, field) is None:
-                    setattr(state.qualification, field, value)
-        else:
-            state.qualification = qualification
-        print("Qualification data updated:", state.qualification)
-    else:
-        print("No qualification data to save.")
-    return state
-
-
-async def run_graph(state: GraphState):
-    state = await gpt(state)
-
-    # Результаты
-    final_generation = state.generation
-    total_tokens = state.total_tokens
-
-    return final_generation, total_tokens
-
+    try:
+        # Prepare input state
+        inputs = {
+            "question": question,
+            "first_question": question,
+            "transformation_count": 0,
+            "openai_helper": openai,
+            "chat_id": chat_id,
+            "total_tokens": 0
+        }
+        
+        # Run the graph asynchronously
+        logger.info(f"Starting graph execution for chat_id {chat_id}")
+        async for output in app.astream(inputs):
+            for key, value in output.items():
+                logger.debug(f"Completed node '{key}'")
+        
+        # Extract final results
+        final_generation = value.get("generation")
+        total_tokens = value.get("total_tokens", 0)
+        
+        logger.info(f"Graph execution completed for chat_id {chat_id}")
+        return final_generation, total_tokens
+        
+    except Exception as e:
+        logger.error(f"Error in graph execution: {str(e)}")
+        raise
 
