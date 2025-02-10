@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: uml-ai-bot
+    env_file: .env
+    command: python main.py
+    restart: always  # Перезапуск контейнера при сбое
+    volumes:
+      - /root/umlbot:/app  # Монтируем директорию проекта с сервера в контейнер
